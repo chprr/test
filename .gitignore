@@ -2,7 +2,7 @@
 .env
 data.db
 database.db
-media
+
 
 __pycache__/
 *.py[codz]
