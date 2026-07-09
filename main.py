@@ -32,9 +32,9 @@ load_dotenv()
 TOKEN = getenv("BOT_TOKEN")
 
 # ================= НАСТРОЙКИ БОТА =================
-ADMIN_ID = 123456789  # ЗАМЕНИТЕ НА СВОЙ TELEGRAM ID
-CHANNEL_ID = "@your_channel_username" # ЗАМЕНИТЕ НА USERNAME КАНАЛА
-CHANNEL_URL = "https://t.me/your_channel_username" # ССЫЛКА НА КАНАЛ
+ADMIN_ID = 8698190793  # ЗАМЕНИТЕ НА СВОЙ TELEGRAM ID
+CHANNEL_ID = "@chprrshop" # ЗАМЕНИТЕ НА USERNAME КАНАЛА
+CHANNEL_URL = "https://t.me/chprrshop" # ССЫЛКА НА КАНАЛ
 # ==================================================
 
 # --- НАСТРОЙКА ДИРЕКТОРИЙ (ДЛЯ RAILWAY И ПК) ---
