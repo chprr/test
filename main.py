@@ -32,10 +32,15 @@ load_dotenv()
 TOKEN = getenv("BOT_TOKEN")
 
 # ================= НАСТРОЙКИ БОТА =================
-ADMIN_ID = 8698190793  # ЗАМЕНИТЕ НА СВОЙ TELEGRAM ID
-CHANNEL_ID = "@chprrshop" # ЗАМЕНИТЕ НА USERNAME КАНАЛА
-CHANNEL_URL = "https://t.me/chprrshop" # ССЫЛКА НА КАНАЛ
+ADMIN_ID = 123456789  # ЗАМЕНИТЕ НА СВОЙ TELEGRAM ID
+CHANNEL_ID = "@your_channel_username" # ЗАМЕНИТЕ НА USERNAME КАНАЛА
+CHANNEL_URL = "https://t.me/your_channel_username" # ССЫЛКА НА КАНАЛ
 # ==================================================
+
+# --- НАСТРОЙКА ДИРЕКТОРИЙ (ДЛЯ RAILWAY И ПК) ---
+DATA_DIR = Path(getenv("DATA_DIR", "."))
+MEDIA_DIR = DATA_DIR / "media"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 dp = Dispatcher()
 
@@ -301,7 +306,7 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
                 )
                 media_group = MediaGroupBuilder(caption=text)
                 for file_name in files:
-                    file_path = Path('.').joinpath("media").joinpath(file_name.file_name)
+                    file_path = MEDIA_DIR.joinpath(file_name.file_name)
                     media_group.add(type="photo", media=FSInputFile(file_path))
                 await deleted_messages.bot.send_media_group(chat_id=user_chat_id, media=media_group.build())
                     
@@ -311,20 +316,20 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
                     f"🎥 <b>{sender_link} удалил видео</b>\n\n"
                     f"<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
                 )
-                file_path = Path('.').joinpath("media").joinpath(fileDb.file_name)
+                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
                 await deleted_messages.bot.send_video(chat_id=user_chat_id, video=FSInputFile(file_path), caption=text)
             
             elif msg.type == "video_note":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
                 text = f"📹 <b>{sender_link} удалил кружочек ⬆️</b>"
-                file_path = Path('.').joinpath("media").joinpath(fileDb.file_name)
+                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
                 await deleted_messages.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(file_path))
                 await deleted_messages.bot.send_message(chat_id=user_chat_id, text=text)
 
             elif msg.type == "audio":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
                 text = f"🎤 <b>{sender_link} удалил голосовое сообщение</b>"
-                file_path = Path('.').joinpath("media").joinpath(fileDb.file_name)
+                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
                 await deleted_messages.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(file_path), caption=text)
             
             elif msg.type == "document":
@@ -333,7 +338,7 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
                     f"📁 <b>{sender_link} удалил файл</b>\n\n"
                     f"<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
                 )
-                file_path = Path('.').joinpath("media").joinpath(fileDb.file_name)
+                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
                 await deleted_messages.bot.send_document(chat_id=user_chat_id, document=FSInputFile(file_path), caption=text)
             
             elif msg.type == "text":
@@ -354,7 +359,7 @@ async def handle_business_message(message: MessageType):
 
             if reply_to.photo:
                 file_name = f"{uuid4()}.jpg"
-                file_path = Path('.').joinpath("media").joinpath(file_name)
+                file_path = MEDIA_DIR.joinpath(file_name)
                 fl = await message.bot.get_file(reply_to.photo[-1].file_id)
                 await message.bot.download_file(fl.file_path, file_path)
                 await message.bot.send_photo(chat_id=user_chat_id, photo=FSInputFile(file_path))
@@ -362,7 +367,7 @@ async def handle_business_message(message: MessageType):
             
             elif reply_to.video:
                 file_name = f"{uuid4()}.mp4"
-                file_path = Path('.').joinpath("media").joinpath(file_name)
+                file_path = MEDIA_DIR.joinpath(file_name)
                 fl = await message.bot.get_file(reply_to.video.file_id)
                 await message.bot.download_file(fl.file_path, file_path)
                 await message.bot.send_video(chat_id=user_chat_id, video=FSInputFile(file_path))
@@ -370,7 +375,7 @@ async def handle_business_message(message: MessageType):
             
             elif reply_to.video_note:
                 file_name = f"{uuid4()}.mp4"
-                file_path = Path('.').joinpath("media").joinpath(file_name)
+                file_path = MEDIA_DIR.joinpath(file_name)
                 fl = await message.bot.get_file(reply_to.video_note.file_id)
                 await message.bot.download_file(fl.file_path, file_path)
                 await message.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(file_path))
@@ -378,7 +383,7 @@ async def handle_business_message(message: MessageType):
             
             elif reply_to.voice:
                 file_name = f"{uuid4()}.ogg"
-                file_path = Path('.').joinpath("media").joinpath(file_name)
+                file_path = MEDIA_DIR.joinpath(file_name)
                 fl = await message.bot.get_file(reply_to.voice.file_id)
                 await message.bot.download_file(fl.file_path, file_path)
                 await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(file_path))
@@ -389,7 +394,7 @@ async def handle_business_message(message: MessageType):
             session.add(msg)
             file_name = f"{uuid4()}.jpg"
             fl = await message.bot.get_file(message.photo[-1].file_id)
-            await message.bot.download_file(fl.file_path, Path('.').joinpath("media").joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
 
@@ -398,7 +403,7 @@ async def handle_business_message(message: MessageType):
             session.add(msg)
             file_name = f"{uuid4()}.mp4"
             fl = await message.bot.get_file(message.video.file_id)
-            await message.bot.download_file(fl.file_path, Path('.').joinpath("media").joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
 
@@ -407,7 +412,7 @@ async def handle_business_message(message: MessageType):
             session.add(msg)
             file_name = f"{uuid4()}.mp4"
             fl = await message.bot.get_file(message.video_note.file_id)
-            await message.bot.download_file(fl.file_path, Path('.').joinpath("media").joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
 
@@ -416,7 +421,7 @@ async def handle_business_message(message: MessageType):
             session.add(msg)
             file_name = f"{uuid4()}.ogg"
             fl = await message.bot.get_file(message.voice.file_id)
-            await message.bot.download_file(fl.file_path, Path('.').joinpath("media").joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
 
@@ -426,7 +431,7 @@ async def handle_business_message(message: MessageType):
             ext = message.document.mime_type.split('/')[1] if message.document.mime_type else "bin"
             file_name = f"{uuid4()}.{ext}"
             fl = await message.bot.get_file(message.document.file_id)
-            await message.bot.download_file(fl.file_path, Path('.').joinpath("media").joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
 
