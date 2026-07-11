@@ -12,6 +12,8 @@ from aiogram import Bot, Dispatcher, html, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message as MessageType,
     BusinessMessagesDeleted,
@@ -42,6 +44,11 @@ MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 dp = Dispatcher()
+
+# --- СОСТОЯНИЯ ДЛЯ АДМИН-ПАНЕЛИ (FSM) ---
+class AdminStates(StatesGroup):
+    waiting_for_price = State()
+    waiting_for_card = State()
 
 # --- МОДЕЛИ БАЗЫ ДАННЫХ ---
 class User(SQLModel, table=True):
@@ -93,9 +100,18 @@ def check_premium_access(session: SQLSession, user_id: int, settings: BotSetting
             session.commit()
     return False
 
-def get_main_menu_text():
+def get_main_menu_text(user_id: int):
+    with SQLSession(db.engine) as session:
+        user = session.get(User, user_id)
+    
+    if user and user.is_premium and user.premium_until and user.premium_until > datetime.now():
+        status = f"👑 <b>Premium</b> (активен до {user.premium_until.strftime('%d.%m.%Y %H:%M')})"
+    else:
+        status = "❌ <b>Бесплатная (Ограниченная)</b>"
+
     return (
         "🤖 <b>Главная страница Savemod Bot</b>\n\n"
+        f"📊 <b>Ваш статус подписки:</b> {status}\n\n"
         "Я — ваш надежный бизнес-помощник для сохранения данных. Вот что я умею:\n\n"
         "🗑 <b>Восстановление удаленного:</b> Сохраняю сообщения, которые удалил собеседник.\n"
         "✏️ <b>История изменений:</b> Показываю старую и новую версию измененных сообщений.\n"
@@ -138,9 +154,8 @@ async def command_start_handler(message: MessageType, command: CommandObject) ->
                     session.add(inviter)
             session.commit()
 
-    # Изменение: если пользователь уже подписан, сразу выдаем главное меню
     if await is_user_subscribed(message.bot, user_id):
-        await message.answer(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
+        await message.answer(get_main_menu_text(user_id), reply_markup=get_main_menu_keyboard())
     else:
         text = (
             f"Привет, {html.bold(message.from_user.full_name)}!\n\n"
@@ -152,7 +167,7 @@ async def command_start_handler(message: MessageType, command: CommandObject) ->
 async def check_subscription_handler(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     if await is_user_subscribed(bot, user_id):
-        await callback.message.edit_text(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
+        await callback.message.edit_text(get_main_menu_text(user_id), reply_markup=get_main_menu_keyboard())
     else:
         await callback.answer("❌ Вы еще не подписались на канал!", show_alert=True)
 
@@ -180,7 +195,7 @@ async def view_referrals_handler(callback: CallbackQuery, bot: Bot):
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu_handler(callback: CallbackQuery):
-    await callback.message.edit_text(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
+    await callback.message.edit_text(get_main_menu_text(callback.from_user.id), reply_markup=get_main_menu_keyboard())
 
 # --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("give_premium"))
@@ -242,7 +257,6 @@ async def toggle_bot_mode(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=keyboard)
     await callback.answer(f"Режим изменен на {mode_text}")
 
-# Исправление: Рабочая панель настройки платежей
 @dp.callback_query(F.data == "setup_payments")
 async def setup_payments_handler(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
@@ -257,16 +271,65 @@ async def setup_payments_handler(callback: CallbackQuery):
         f"Текущий способ оплаты: <b>{current_method}</b>\n"
         f"Цена в звездах: <code>{settings.price_stars} Stars</code>\n"
         f"Реквизиты карты: <code>{settings.payment_card}</code>\n\n"
-        "<i>Для изменения цены или реквизитов обновите значения по умолчанию в базе данных или коде.</i>"
+        "Нажмите кнопки ниже, чтобы изменить параметры прямо в чате."
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Включить оплату Звездами", callback_data="set_method_stars")],
-        [InlineKeyboardButton(text="💳 Включить оплату Картой", callback_data="set_method_card")],
+        [InlineKeyboardButton(text="⭐ Метод: Звезды", callback_data="set_method_stars"),
+         InlineKeyboardButton(text="💳 Метод: Карта", callback_data="set_method_card")],
+        [InlineKeyboardButton(text="💰 Изменить цену", callback_data="edit_price"),
+         InlineKeyboardButton(text="📝 Изменить реквизиты", callback_data="edit_card")],
         [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
     ])
     
     await callback.message.edit_text(text, reply_markup=keyboard)
+
+# --- ИЗМЕНЕНИЕ ПАРАМЕТРОВ ОПЛАТЫ ЧЕРЕЗ БОТА (FSM) ---
+@dp.callback_query(F.data == "edit_price")
+async def edit_price_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer("💰 <b>Введите новую цену подписки в Звездах (только число):</b>")
+    await state.set_state(AdminStates.waiting_for_price)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_price)
+async def process_new_price(message: MessageType, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    if not message.text.isdigit():
+        await message.answer("❌ Ошибка! Пожалуйста, введите корректное число (например: 150).")
+        return
+    
+    new_price = int(message.text)
+    with SQLSession(db.engine) as session:
+        settings = session.get(BotSettings, 1) or BotSettings(id=1)
+        settings.price_stars = new_price
+        session.add(settings)
+        session.commit()
+        
+    await message.answer(f"✅ Цена успешно изменена на <b>{new_price} Stars</b>!")
+    await state.clear()
+    await admin_panel(message)
+
+@dp.callback_query(F.data == "edit_card")
+async def edit_card_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.answer("💳 <b>Введите новые реквизиты карты (одним сообщением):</b>")
+    await state.set_state(AdminStates.waiting_for_card)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_card)
+async def process_new_card(message: MessageType, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    new_card = message.text
+    with SQLSession(db.engine) as session:
+        settings = session.get(BotSettings, 1) or BotSettings(id=1)
+        settings.payment_card = new_card
+        session.add(settings)
+        session.commit()
+        
+    await message.answer("✅ Реквизиты карты успешно обновлены!")
+    await state.clear()
+    await admin_panel(message)
 
 @dp.callback_query(F.data.startswith("set_method_"))
 async def set_payment_method(callback: CallbackQuery):
@@ -294,9 +357,9 @@ async def buy_premium_handler(callback: CallbackQuery):
         settings = session.get(BotSettings, 1) or BotSettings(id=1)
         
     if settings.payment_method == "stars":
-        await callback.message.answer(f"🤖 <b>Оплата Premium (Stars)</b>\n\nДля оплаты отправьте {settings.price_stars} Stars (Метод интеграции XTR платежей в разработке).")
+        await callback.message.answer(f"🤖 <b>Оплата Premium (Stars)</b>\n\nДля оплаты переведите {settings.price_stars} Stars (XTR-платежи в интеграции).")
     else:
-        await callback.message.answer(f"🤖 <b>Оплата Premium (Карта)</b>\n\nПереведите сумму на указанные реквизиты:\n{settings.payment_card}\n\nПосле оплаты отправьте чек администратору.")
+        await callback.message.answer(f"🤖 <b>Оплата Premium (Карта)</b>\n\nПереведите сумму на указанные реквизиты:\n<code>{settings.payment_card}</code>\n\nПосле оплаты отправьте чек администратору.")
     await callback.answer()
 
 # --- БИЗНЕС ЛОГИКА ---
@@ -307,30 +370,32 @@ async def handle_edited_business_message(message: MessageType):
         user_chat_id = business_connection.user_chat_id
         settings = session.get(BotSettings, 1) or BotSettings(id=1)
         
+        old_msg = session.exec(
+            select(Message).where(Message.chat_id == message.chat.id).where(Message.id == message.message_id)
+        ).first()
+        username = old_msg.from_username if old_msg else (message.chat.username or message.chat.first_name or "Пользователь")
+        sender_link = f"<a href='tg://user?id={message.chat.id}'>{username}</a>"
+
+        # Изменение: Если подписка бесплатная, уведомляем КТО изменил, но скрываем ЧТО именно
         if not check_premium_access(session, user_chat_id, settings):
             buy_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Приобресить Premium", callback_data="buy_premium")]
+                [InlineKeyboardButton(text="💎 Приобрести Premium", callback_data="buy_premium")]
             ])
             await message.bot.send_message(
                 chat_id=user_chat_id, 
-                text="🔒 <b>Собеседник изменил сообщение!</b>\n\nБот сейчас работает в платном режиме. Приобретите Premium или пригласите 3 друзей.",
+                text=f"✏️ <b>{sender_link} изменил сообщение!</b>\n\n"
+                     f"🔒 <b>Содержимое скрыто.</b> Для просмотра старой и новой версии истории изменений, "
+                     f"приобретите Premium подписку или пригласите 3 друзей.",
                 reply_markup=buy_keyboard
             )
             return
 
-        old_msg = session.exec(
-            select(Message).where(Message.chat_id == message.chat.id).where(Message.id == message.message_id)
-        ).first()
-
         if not old_msg: return
-
         new_content = message.text or message.caption or ""
         old_content = old_msg.content or ""
 
         if old_content != new_content:
-            sender_link = f"<a href='tg://user?id={message.chat.id}'>{old_msg.from_username}</a>"
-            
-            # Изменение: убраны красный и зеленый кружочки
+            # Кружочки убраны
             alert_text = (
                 f"✏️ <b>{sender_link} изменил сообщение</b>\n\n"
                 f"<b>Было:</b>\n"
@@ -338,7 +403,6 @@ async def handle_edited_business_message(message: MessageType):
                 f"<b>Стало:</b>\n"
                 f"<blockquote>{new_content if new_content else '<i>Текст удален</i>'}</blockquote>"
             )
-            
             await message.bot.send_message(chat_id=user_chat_id, text=alert_text)
             
             old_msg.content = new_content
@@ -352,7 +416,25 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
         user_chat_id = business_connection.user_chat_id
         settings = session.get(BotSettings, 1) or BotSettings(id=1)
         
+        # Изменение: Если подписка бесплатная, уведомляем КТО удалил, скрывая контент
         if not check_premium_access(session, user_chat_id, settings):
+            buy_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Приобрести Premium", callback_data="buy_premium")]
+            ])
+            for message_id in deleted_messages.message_ids:
+                msg = session.exec(
+                    select(Message).where(Message.chat_id == deleted_messages.chat.id).where(Message.id == message_id)
+                ).first()
+                username = msg.from_username if msg else "Пользователь"
+                sender_link = f"<a href='tg://user?id={deleted_messages.chat.id}'>{username}</a>"
+                
+                await deleted_messages.bot.send_message(
+                    chat_id=user_chat_id, 
+                    text=f"🗑 <b>{sender_link} удалил сообщение!</b>\n\n"
+                         f"🔒 <b>Содержимое скрыто.</b> Чтобы восстановить удаленный текст или медиафайл, "
+                         f"приобретите Premium подписку.",
+                    reply_markup=buy_keyboard
+                )
             return
 
         for message_id in deleted_messages.message_ids:
@@ -393,18 +475,14 @@ async def handle_business_message(message: MessageType):
         business_connection = await message.bot.get_business_connection(message.business_connection_id)
         user_chat_id = business_connection.user_chat_id
 
-        # Изменение: перехват РЕПЛАЕВ только на одноразовые (View Once / с таймером) сообщения
+        # Изменение/Исправление: Надежный перехват исключительно ОДНОРАЗОВЫХ сообщений по реплаю
         if message.reply_to_message:
             reply = message.reply_to_message
             
-            # Проверка, является ли медіа одноразовым (наличие спойлера или ttl_period)
-            is_one_time = False
-            if reply.photo and (hasattr(reply, 'has_media_spoiler') and reply.has_media_spoiler):
-                is_one_time = True
-            elif reply.video and (hasattr(reply, 'has_media_spoiler') and reply.has_media_spoiler):
-                is_one_time = True
-            elif hasattr(reply, 'ttl_period') and reply.ttl_period is not None:
-                is_one_time = True
+            # Проверяем маркеры сгорания (таймер TTL или наличие скрытого медиа-спойлера Telegram)
+            ttl = getattr(reply, 'ttl_period', 0) or 0
+            has_spoiler = getattr(reply, 'has_media_spoiler', False) or False
+            is_one_time = has_spoiler or (ttl > 0)
 
             if is_one_time:
                 if reply.photo:
@@ -432,7 +510,7 @@ async def handle_business_message(message: MessageType):
                     await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(MEDIA_DIR / file_name))
                     Path.unlink(MEDIA_DIR / file_name)
 
-        # Фоновое логгирование входящих сообщений для базы данных
+        # Фоновое логгирование входящих сообщений в базу (для работы функции восстановления)
         elif message.photo:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="photos", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
