@@ -468,49 +468,54 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
             elif msg.type == "text":
                 text = f"🗑 <b>{sender_link} удалил сообщение</b>\n\n📝 <b>Текст:</b>\n<blockquote>{msg.content}</blockquote>"
                 await deleted_messages.bot.send_message(chat_id=user_chat_id, text=text)
-
 @dp.business_message()
 async def handle_business_message(message: MessageType):
     with SQLSession(db.engine) as session:
         business_connection = await message.bot.get_business_connection(message.business_connection_id)
         user_chat_id = business_connection.user_chat_id
 
-        # Изменение/Исправление: Надежный перехват исключительно ОДНОРАЗОВЫХ сообщений по реплаю
+        # --- МОДУЛЬ СОХРАНЕНИЯ МЕДИА ПО РЕПЛАЮ (ВОССТАНОВЛЕН И ИСПРАВЛЕН) ---
+        # Бот сохраняет всё медиа по реплаю, так как API Telegram не отличает 
+        # обычные фото от сгорающих.
         if message.reply_to_message:
             reply = message.reply_to_message
             
-            # Проверяем маркеры сгорания (таймер TTL или наличие скрытого медиа-спойлера Telegram)
-            ttl = getattr(reply, 'ttl_period', 0) or 0
-            has_spoiler = getattr(reply, 'has_media_spoiler', False) or False
-            is_one_time = has_spoiler or (ttl > 0)
-
-            if is_one_time:
+            try:
                 if reply.photo:
                     file_name = f"{uuid4()}.jpg"
+                    file_path = MEDIA_DIR / file_name
                     fl = await message.bot.get_file(reply.photo[-1].file_id)
-                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
-                    await message.bot.send_photo(chat_id=user_chat_id, photo=FSInputFile(MEDIA_DIR / file_name))
-                    Path.unlink(MEDIA_DIR / file_name)
+                    await message.bot.download_file(fl.file_path, file_path)
+                    await message.bot.send_photo(chat_id=user_chat_id, photo=FSInputFile(file_path), caption="🔥 Сохраненное фото")
+                    Path.unlink(file_path)
+                
                 elif reply.video:
                     file_name = f"{uuid4()}.mp4"
+                    file_path = MEDIA_DIR / file_name
                     fl = await message.bot.get_file(reply.video.file_id)
-                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
-                    await message.bot.send_video(chat_id=user_chat_id, video=FSInputFile(MEDIA_DIR / file_name))
-                    Path.unlink(MEDIA_DIR / file_name)
+                    await message.bot.download_file(fl.file_path, file_path)
+                    await message.bot.send_video(chat_id=user_chat_id, video=FSInputFile(file_path), caption="🔥 Сохраненное видео")
+                    Path.unlink(file_path)
+                
                 elif reply.video_note:
                     file_name = f"{uuid4()}.mp4"
+                    file_path = MEDIA_DIR / file_name
                     fl = await message.bot.get_file(reply.video_note.file_id)
-                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
-                    await message.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(MEDIA_DIR / file_name))
-                    Path.unlink(MEDIA_DIR / file_name)
+                    await message.bot.download_file(fl.file_path, file_path)
+                    await message.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(file_path))
+                    Path.unlink(file_path)
+                
                 elif reply.voice:
                     file_name = f"{uuid4()}.ogg"
+                    file_path = MEDIA_DIR / file_name
                     fl = await message.bot.get_file(reply.voice.file_id)
-                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
-                    await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(MEDIA_DIR / file_name))
-                    Path.unlink(MEDIA_DIR / file_name)
+                    await message.bot.download_file(fl.file_path, file_path)
+                    await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(file_path), caption="🔥 Сохраненное ГС")
+                    Path.unlink(file_path)
+            except Exception as e:
+                logging.error(f"Ошибка при сохранении медиа через реплай: {e}")
 
-        # Фоновое логгирование входящих сообщений в базу (для работы функции восстановления)
+        # --- ФОНОВОЕ СОХРАНЕНИЕ ДЛЯ УДАЛЕННЫХ/ИЗМЕНЕННЫХ СООБЩЕНИЙ ---
         elif message.photo:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="photos", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
@@ -519,6 +524,7 @@ async def handle_business_message(message: MessageType):
             await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
+            
         elif message.video:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="video", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
@@ -527,6 +533,7 @@ async def handle_business_message(message: MessageType):
             await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
+            
         elif message.video_note:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="video_note", content="", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
@@ -535,6 +542,7 @@ async def handle_business_message(message: MessageType):
             await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
+            
         elif message.voice:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="audio", content="", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
@@ -543,6 +551,7 @@ async def handle_business_message(message: MessageType):
             await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
+            
         elif message.document:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="document", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
@@ -552,6 +561,7 @@ async def handle_business_message(message: MessageType):
             await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
+            
         else:
             msg = Message(chat_id=message.chat.id, id=message.message_id, type="text", content=message.text, from_username=message.from_user.username or "Скрыт")
             session.add(msg)
