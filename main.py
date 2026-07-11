@@ -37,14 +37,13 @@ CHANNEL_ID = "@chprrshop" # ЗАМЕНИТЕ НА USERNAME КАНАЛА
 CHANNEL_URL = "https://t.me/chprrshop" # ССЫЛКА НА КАНАЛ
 # ==================================================
 
-# --- НАСТРОЙКА ДИРЕКТОРИЙ (ДЛЯ RAILWAY И ПК) ---
 DATA_DIR = Path(getenv("DATA_DIR", "."))
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 dp = Dispatcher()
 
-# --- НОВЫЕ МОДЕЛИ БАЗЫ ДАННЫХ ---
+# --- МОДЕЛИ БАЗЫ ДАННЫХ ---
 class User(SQLModel, table=True):
     id: int = Field(primary_key=True)
     is_premium: bool = Field(default=False)
@@ -57,14 +56,29 @@ class BotSettings(SQLModel, table=True):
     is_paid_mode: bool = Field(default=False)
     price_stars: int = Field(default=100)
     payment_card: str = Field(default="💳 4149 1234 5678 9000 (Monobank)")
-    payment_method: str = Field(default="stars")
+    payment_method: str = Field(default="stars")  # 'stars' или 'card'
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_subscription_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
-        [InlineKeyboardButton(text="🔄 Проверить", callback_data="check_subscription")]
+        [InlineKeyboardButton(text="🔄 Проверить подписку", callback_data="check_subscription")]
     ])
+
+def get_main_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Реферальная система", callback_data="view_referrals")],
+        [InlineKeyboardButton(text="💎 Купить Premium", callback_data="buy_premium")]
+    ])
+
+async def is_user_subscribed(bot: Bot, user_id: int) -> bool:
+    try:
+        chat_member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        valid_statuses = [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]
+        return chat_member.status in valid_statuses
+    except Exception as e:
+        logging.error(f"Ошибка проверки подписки: {e}")
+        return False
 
 def check_premium_access(session: SQLSession, user_id: int, settings: BotSettings) -> bool:
     if not settings.is_paid_mode:
@@ -78,6 +92,16 @@ def check_premium_access(session: SQLSession, user_id: int, settings: BotSetting
             user.is_premium = False
             session.commit()
     return False
+
+def get_main_menu_text():
+    return (
+        "🤖 <b>Главная страница Savemod Bot</b>\n\n"
+        "Я — ваш надежный бизнес-помощник для сохранения данных. Вот что я умею:\n\n"
+        "🗑 <b>Восстановление удаленного:</b> Сохраняю сообщения, которые удалил собеседник.\n"
+        "✏️ <b>История изменений:</b> Показываю старую и новую версию измененных сообщений.\n"
+        "🔥 <b>Самоуничтожающиеся фото:</b> Перехватываю фото с таймером (просто сделайте reply).\n"
+        "📁 <b>Все форматы:</b> Поддерживаю текст, фото, видео, кружочки, ГС и документы."
+    )
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 @dp.message(CommandStart())
@@ -95,7 +119,6 @@ async def command_start_handler(message: MessageType, command: CommandObject) ->
             user = User(id=user_id, invited_by=inviter_id)
             session.add(user)
             
-            # Логика реферальной системы
             if inviter_id and inviter_id != user_id:
                 inviter = session.get(User, inviter_id)
                 if inviter:
@@ -115,40 +138,49 @@ async def command_start_handler(message: MessageType, command: CommandObject) ->
                     session.add(inviter)
             session.commit()
 
-    text = (
-        f"Привет, {html.bold(message.from_user.full_name)}!\n\n"
-        f"Для использования бота и всех его функций, пожалуйста, подпишитесь на наш официальный канал."
-    )
-    await message.answer(text, reply_markup=get_subscription_keyboard())
+    # Изменение: если пользователь уже подписан, сразу выдаем главное меню
+    if await is_user_subscribed(message.bot, user_id):
+        await message.answer(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
+    else:
+        text = (
+            f"Привет, {html.bold(message.from_user.full_name)}!\n\n"
+            f"Для использования бота и всех его функций, пожалуйста, подпишитесь на наш официальный канал."
+        )
+        await message.answer(text, reply_markup=get_subscription_keyboard())
 
 @dp.callback_query(F.data == "check_subscription")
 async def check_subscription_handler(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
-    try:
-        chat_member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        valid_statuses = [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]
+    if await is_user_subscribed(bot, user_id):
+        await callback.message.edit_text(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
+    else:
+        await callback.answer("❌ Вы еще не подписались на канал!", show_alert=True)
+
+@dp.callback_query(F.data == "view_referrals")
+async def view_referrals_handler(callback: CallbackQuery, bot: Bot):
+    user_id = callback.from_user.id
+    bot_info = await bot.get_me()
+    bot_link = f"https://t.me/{bot_info.username}?start={user_id}"
+    
+    with SQLSession(db.engine) as session:
+        user = session.get(User, user_id)
+        ref_count = user.referral_count if user else 0
         
-        if chat_member.status in valid_statuses:
-            bot_info = await bot.get_me()
-            bot_link = f"https://t.me/{bot_info.username}?start={user_id}"
-            
-            main_menu_text = (
-                "🎉 <b>Спасибо за подписку!</b>\n\n"
-                "🤖 <b>Главная страница Savemod Bot</b>\n\n"
-                "Я — ваш надежный бизнес-помощник для сохранения данных. Вот что я умею:\n\n"
-                "🗑 <b>Восстановление удаленного:</b> Сохраняю сообщения, которые удалил собеседник.\n"
-                "✏️ <b>История изменений:</b> Показываю старую и новую версию измененных сообщений.\n"
-                "🔥 <b>Самоуничтожающиеся фото:</b> Перехватываю фото с таймером (просто сделайте reply).\n"
-                "📁 <b>Все форматы:</b> Поддерживаю текст, фото, видео, кружочки, ГС и документы.\n\n"
-                f"🎁 Ваша реферальная ссылка: <code>{bot_link}</code>\n"
-                f"<i>Пригласите 3 друзей и получите 2 недели Premium бесплатно!</i>"
-            )
-            await callback.message.edit_text(main_menu_text)
-        else:
-            await callback.answer("❌ Вы еще не подписались на канал!", show_alert=True)
-    except Exception as e:
-        logging.error(f"Ошибка проверки подписки: {e}")
-        await callback.answer("⚠️ Ошибка при проверке. Убедитесь, что бот является администратором канала.", show_alert=True)
+    ref_text = (
+        "👥 <b>Реферальная система Savemod Bot</b>\n\n"
+        f"🎁 Ваша реферальная ссылка: <code>{bot_link}</code>\n\n"
+        f"📊 Всего приглашено друзей: <b>{ref_count}</b>\n"
+        "<i>Пригласите 3 друзей и получите 2 недели Premium бесплатно!</i>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_menu")]
+    ])
+    await callback.message.edit_text(ref_text, reply_markup=keyboard)
+
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu_handler(callback: CallbackQuery):
+    await callback.message.edit_text(get_main_menu_text(), reply_markup=get_main_menu_keyboard())
 
 # --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("give_premium"))
@@ -187,7 +219,7 @@ async def admin_panel(message: MessageType):
     mode_text = "🔴 Платный" if settings.is_paid_mode else "🟢 Бесплатный"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Режим бота: {mode_text}", callback_data="toggle_mode")],
-        [InlineKeyboardButton(text="Настроить оплату", callback_data="setup_payments")]
+        [InlineKeyboardButton(text="⚙️ Настроить оплату", callback_data="setup_payments")]
     ])
     await message.answer("🛠 <b>Админ Панель</b>", reply_markup=keyboard)
 
@@ -204,15 +236,68 @@ async def toggle_bot_mode(callback: CallbackQuery):
         mode_text = "🔴 Платный" if settings.is_paid_mode else "🟢 Бесплатный"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"Режим бота: {mode_text}", callback_data="toggle_mode")],
-            [InlineKeyboardButton(text="Настроить оплату", callback_data="setup_payments")]
+            [InlineKeyboardButton(text="⚙️ Настроить оплату", callback_data="setup_payments")]
         ])
         
     await callback.message.edit_reply_markup(reply_markup=keyboard)
     await callback.answer(f"Режим изменен на {mode_text}")
 
+# Исправление: Рабочая панель настройки платежей
+@dp.callback_query(F.data == "setup_payments")
+async def setup_payments_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    
+    with SQLSession(db.engine) as session:
+        settings = session.get(BotSettings, 1) or BotSettings(id=1)
+    
+    current_method = "⭐ Звезды Telegram" if settings.payment_method == "stars" else "💳 Банковская карта"
+    
+    text = (
+        "⚙️ <b>Настройка платежных методов</b>\n\n"
+        f"Текущий способ оплаты: <b>{current_method}</b>\n"
+        f"Цена в звездах: <code>{settings.price_stars} Stars</code>\n"
+        f"Реквизиты карты: <code>{settings.payment_card}</code>\n\n"
+        "<i>Для изменения цены или реквизитов обновите значения по умолчанию в базе данных или коде.</i>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Включить оплату Звездами", callback_data="set_method_stars")],
+        [InlineKeyboardButton(text="💳 Включить оплату Картой", callback_data="set_method_card")],
+        [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("set_method_"))
+async def set_payment_method(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    method = callback.data.split("_")[2]
+    
+    with SQLSession(db.engine) as session:
+        settings = session.get(BotSettings, 1)
+        settings.payment_method = method
+        session.add(settings)
+        session.commit()
+        
+    await callback.answer(f"Способ оплаты изменен на: {method}")
+    await setup_payments_handler(callback)
+
+@dp.callback_query(F.data == "back_to_admin")
+async def back_to_admin_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    await callback.message.delete()
+    await admin_panel(callback.message)
+
 @dp.callback_query(F.data == "buy_premium")
 async def buy_premium_handler(callback: CallbackQuery):
-    await callback.answer("Метод оплаты находится в разработке.", show_alert=True)
+    with SQLSession(db.engine) as session:
+        settings = session.get(BotSettings, 1) or BotSettings(id=1)
+        
+    if settings.payment_method == "stars":
+        await callback.message.answer(f"🤖 <b>Оплата Premium (Stars)</b>\n\nДля оплаты отправьте {settings.price_stars} Stars (Метод интеграции XTR платежей в разработке).")
+    else:
+        await callback.message.answer(f"🤖 <b>Оплата Premium (Карта)</b>\n\nПереведите сумму на указанные реквизиты:\n{settings.payment_card}\n\nПосле оплаты отправьте чек администратору.")
+    await callback.answer()
 
 # --- БИЗНЕС ЛОГИКА ---
 @dp.edited_business_message()
@@ -220,27 +305,21 @@ async def handle_edited_business_message(message: MessageType):
     with SQLSession(db.engine) as session:
         business_connection = await message.bot.get_business_connection(message.business_connection_id)
         user_chat_id = business_connection.user_chat_id
-
         settings = session.get(BotSettings, 1) or BotSettings(id=1)
         
-        # Проверка премиума
         if not check_premium_access(session, user_chat_id, settings):
             buy_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Приобрести Premium", callback_data="buy_premium")]
+                [InlineKeyboardButton(text="💎 Приобресить Premium", callback_data="buy_premium")]
             ])
             await message.bot.send_message(
                 chat_id=user_chat_id, 
-                text="🔒 <b>Собеседник изменил сообщение!</b>\n\n"
-                     "Бот сейчас работает в платном режиме. Чтобы увидеть старую версию сообщения, "
-                     "приобретите Premium подписку или пригласите 3 друзей.",
+                text="🔒 <b>Собеседник изменил сообщение!</b>\n\nБот сейчас работает в платном режиме. Приобретите Premium или пригласите 3 друзей.",
                 reply_markup=buy_keyboard
             )
             return
 
         old_msg = session.exec(
-            select(Message)
-            .where(Message.chat_id == message.chat.id)
-            .where(Message.id == message.message_id)
+            select(Message).where(Message.chat_id == message.chat.id).where(Message.id == message.message_id)
         ).first()
 
         if not old_msg: return
@@ -251,11 +330,12 @@ async def handle_edited_business_message(message: MessageType):
         if old_content != new_content:
             sender_link = f"<a href='tg://user?id={message.chat.id}'>{old_msg.from_username}</a>"
             
+            # Изменение: убраны красный и зеленый кружочки
             alert_text = (
                 f"✏️ <b>{sender_link} изменил сообщение</b>\n\n"
-                f"🔴 <b>Было:</b>\n"
+                f"<b>Было:</b>\n"
                 f"<blockquote>{old_content if old_content else '<i>Без текста</i>'}</blockquote>\n"
-                f"🟢 <b>Стало:</b>\n"
+                f"<b>Стало:</b>\n"
                 f"<blockquote>{new_content if new_content else '<i>Текст удален</i>'}</blockquote>"
             )
             
@@ -270,82 +350,41 @@ async def handle_business_message_deleted(deleted_messages: BusinessMessagesDele
     with SQLSession(db.engine) as session:
         business_connection = await deleted_messages.bot.get_business_connection(deleted_messages.business_connection_id)
         user_chat_id = business_connection.user_chat_id
-
         settings = session.get(BotSettings, 1) or BotSettings(id=1)
         
-        # Проверка премиума
         if not check_premium_access(session, user_chat_id, settings):
-            buy_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Приобрести Premium", callback_data="buy_premium")]
-            ])
-            await deleted_messages.bot.send_message(
-                chat_id=user_chat_id, 
-                text="🔒 <b>Собеседник удалил сообщение!</b>\n\n"
-                     "Бот сейчас работает в платном режиме. Чтобы увидеть содержимое, "
-                     "приобретите Premium подписку или пригласите 3 друзей.",
-                reply_markup=buy_keyboard
-            )
             return
 
         for message_id in deleted_messages.message_ids:
             msg = session.exec(
-                select(Message)
-                .where(Message.chat_id == deleted_messages.chat.id)
-                .where(Message.id == message_id)
+                select(Message).where(Message.chat_id == deleted_messages.chat.id).where(Message.id == message_id)
             ).first()
 
             if not msg: continue
-
             sender_link = f"<a href='tg://user?id={deleted_messages.chat.id}'>{msg.from_username}</a>"
 
             if msg.type == "photos":
                 files = session.exec(select(File).where(File.message_id == msg.id)).fetchall()
-                text = (
-                    f"🖼 <b>{sender_link} удалил фото</b>\n\n"
-                    f"<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
-                )
+                text = f"🖼 <b>{sender_link} удалил фото</b>\n\n<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
                 media_group = MediaGroupBuilder(caption=text)
                 for file_name in files:
-                    file_path = MEDIA_DIR.joinpath(file_name.file_name)
-                    media_group.add(type="photo", media=FSInputFile(file_path))
+                    media_group.add(type="photo", media=FSInputFile(MEDIA_DIR / file_name.file_name))
                 await deleted_messages.bot.send_media_group(chat_id=user_chat_id, media=media_group.build())
-                    
             elif msg.type == "video":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
-                text = (
-                    f"🎥 <b>{sender_link} удалил видео</b>\n\n"
-                    f"<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
-                )
-                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
-                await deleted_messages.bot.send_video(chat_id=user_chat_id, video=FSInputFile(file_path), caption=text)
-            
+                text = f"🎥 <b>{sender_link} удалил видео</b>\n\n<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
+                await deleted_messages.bot.send_video(chat_id=user_chat_id, video=FSInputFile(MEDIA_DIR / fileDb.file_name), caption=text)
             elif msg.type == "video_note":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
-                text = f"📹 <b>{sender_link} удалил кружочек ⬆️</b>"
-                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
-                await deleted_messages.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(file_path))
-                await deleted_messages.bot.send_message(chat_id=user_chat_id, text=text)
-
+                await deleted_messages.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(MEDIA_DIR / fileDb.file_name))
             elif msg.type == "audio":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
-                text = f"🎤 <b>{sender_link} удалил голосовое сообщение</b>"
-                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
-                await deleted_messages.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(file_path), caption=text)
-            
+                await deleted_messages.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(MEDIA_DIR / fileDb.file_name))
             elif msg.type == "document":
                 fileDb = session.exec(select(File).where(File.message_id == msg.id)).first()
-                text = (
-                    f"📁 <b>{sender_link} удалил файл</b>\n\n"
-                    f"<b>Описание:</b>\n<blockquote>{msg.content if msg.content else '<i>Без описания</i>'}</blockquote>"
-                )
-                file_path = MEDIA_DIR.joinpath(fileDb.file_name)
-                await deleted_messages.bot.send_document(chat_id=user_chat_id, document=FSInputFile(file_path), caption=text)
-            
+                await deleted_messages.bot.send_document(chat_id=user_chat_id, document=FSInputFile(MEDIA_DIR / fileDb.file_name))
             elif msg.type == "text":
-                text = (
-                    f"🗑 <b>{sender_link} удалил сообщение</b>\n\n"
-                    f"📝 <b>Текст:</b>\n<blockquote>{msg.content}</blockquote>"
-                )
+                text = f"🗑 <b>{sender_link} удалил сообщение</b>\n\n📝 <b>Текст:</b>\n<blockquote>{msg.content}</blockquote>"
                 await deleted_messages.bot.send_message(chat_id=user_chat_id, text=text)
 
 @dp.business_message()
@@ -354,89 +393,89 @@ async def handle_business_message(message: MessageType):
         business_connection = await message.bot.get_business_connection(message.business_connection_id)
         user_chat_id = business_connection.user_chat_id
 
+        # Изменение: перехват РЕПЛАЕВ только на одноразовые (View Once / с таймером) сообщения
         if message.reply_to_message:
-            reply_to = message.reply_to_message
+            reply = message.reply_to_message
+            
+            # Проверка, является ли медіа одноразовым (наличие спойлера или ttl_period)
+            is_one_time = False
+            if reply.photo and (hasattr(reply, 'has_media_spoiler') and reply.has_media_spoiler):
+                is_one_time = True
+            elif reply.video and (hasattr(reply, 'has_media_spoiler') and reply.has_media_spoiler):
+                is_one_time = True
+            elif hasattr(reply, 'ttl_period') and reply.ttl_period is not None:
+                is_one_time = True
 
-            if reply_to.photo:
-                file_name = f"{uuid4()}.jpg"
-                file_path = MEDIA_DIR.joinpath(file_name)
-                fl = await message.bot.get_file(reply_to.photo[-1].file_id)
-                await message.bot.download_file(fl.file_path, file_path)
-                await message.bot.send_photo(chat_id=user_chat_id, photo=FSInputFile(file_path))
-                Path.unlink(file_path)
-            
-            elif reply_to.video:
-                file_name = f"{uuid4()}.mp4"
-                file_path = MEDIA_DIR.joinpath(file_name)
-                fl = await message.bot.get_file(reply_to.video.file_id)
-                await message.bot.download_file(fl.file_path, file_path)
-                await message.bot.send_video(chat_id=user_chat_id, video=FSInputFile(file_path))
-                Path.unlink(file_path)
-            
-            elif reply_to.video_note:
-                file_name = f"{uuid4()}.mp4"
-                file_path = MEDIA_DIR.joinpath(file_name)
-                fl = await message.bot.get_file(reply_to.video_note.file_id)
-                await message.bot.download_file(fl.file_path, file_path)
-                await message.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(file_path))
-                Path.unlink(file_path)
-            
-            elif reply_to.voice:
-                file_name = f"{uuid4()}.ogg"
-                file_path = MEDIA_DIR.joinpath(file_name)
-                fl = await message.bot.get_file(reply_to.voice.file_id)
-                await message.bot.download_file(fl.file_path, file_path)
-                await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(file_path))
-                Path.unlink(file_path)
+            if is_one_time:
+                if reply.photo:
+                    file_name = f"{uuid4()}.jpg"
+                    fl = await message.bot.get_file(reply.photo[-1].file_id)
+                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
+                    await message.bot.send_photo(chat_id=user_chat_id, photo=FSInputFile(MEDIA_DIR / file_name))
+                    Path.unlink(MEDIA_DIR / file_name)
+                elif reply.video:
+                    file_name = f"{uuid4()}.mp4"
+                    fl = await message.bot.get_file(reply.video.file_id)
+                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
+                    await message.bot.send_video(chat_id=user_chat_id, video=FSInputFile(MEDIA_DIR / file_name))
+                    Path.unlink(MEDIA_DIR / file_name)
+                elif reply.video_note:
+                    file_name = f"{uuid4()}.mp4"
+                    fl = await message.bot.get_file(reply.video_note.file_id)
+                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
+                    await message.bot.send_video_note(chat_id=user_chat_id, video_note=FSInputFile(MEDIA_DIR / file_name))
+                    Path.unlink(MEDIA_DIR / file_name)
+                elif reply.voice:
+                    file_name = f"{uuid4()}.ogg"
+                    fl = await message.bot.get_file(reply.voice.file_id)
+                    await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
+                    await message.bot.send_audio(chat_id=user_chat_id, audio=FSInputFile(MEDIA_DIR / file_name))
+                    Path.unlink(MEDIA_DIR / file_name)
 
+        # Фоновое логгирование входящих сообщений для базы данных
         elif message.photo:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="photos", content=message.caption if message.caption else "", from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="photos", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             file_name = f"{uuid4()}.jpg"
             fl = await message.bot.get_file(message.photo[-1].file_id)
-            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
-
         elif message.video:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="video", content=message.caption if message.caption else "", from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="video", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             file_name = f"{uuid4()}.mp4"
             fl = await message.bot.get_file(message.video.file_id)
-            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
-
         elif message.video_note:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="video_note", content=message.caption if message.caption else "", from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="video_note", content="", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             file_name = f"{uuid4()}.mp4"
             fl = await message.bot.get_file(message.video_note.file_id)
-            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
-
         elif message.voice:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="audio", content=message.caption if message.caption else "", from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="audio", content="", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             file_name = f"{uuid4()}.ogg"
             fl = await message.bot.get_file(message.voice.file_id)
-            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
-
         elif message.document:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="document", content=message.caption if message.caption else "", from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="document", content=message.caption or "", from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             ext = message.document.mime_type.split('/')[1] if message.document.mime_type else "bin"
             file_name = f"{uuid4()}.{ext}"
             fl = await message.bot.get_file(message.document.file_id)
-            await message.bot.download_file(fl.file_path, MEDIA_DIR.joinpath(file_name))
+            await message.bot.download_file(fl.file_path, MEDIA_DIR / file_name)
             session.add(File(file_name=file_name, message_id=message.message_id))
             session.commit()
-
         else:
-            msg = Message(chat_id=message.chat.id, id=message.message_id, type="text", content=message.text, from_username=message.from_user.username if message.from_user.username else "Скрыт")
+            msg = Message(chat_id=message.chat.id, id=message.message_id, type="text", content=message.text, from_username=message.from_user.username or "Скрыт")
             session.add(msg)
             session.commit()
 
